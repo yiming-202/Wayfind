@@ -415,7 +415,7 @@ select { width: 100%; padding: 12px 40px 12px 13px; border-radius: 10px; border:
       </div>
       <div class="quick-actions">
         <button class="secondary-btn" id="listenHelp" type="button">🔊 Listen to instructions</button>
-        <button class="secondary-btn" id="stopHelpAudio" type="button">■ Stop audio</button>
+        <button class="secondary-btn" id="stopHelpAudio" type="button">■ Stop audio</button>\n      <p id="audioStatus" role="status" aria-live="polite"></p>
         <button class="secondary-btn" id="largeText" type="button" aria-pressed="false">A+ Larger text</button>
         <button class="secondary-btn" id="contrast" type="button" aria-pressed="false">◐ High contrast</button>
         <button class="secondary-btn" id="changeMode" type="button">Change welcome choice</button>
@@ -536,18 +536,38 @@ const $ = (id) => document.getElementById(id);
 function makeStep(title, detail) { return `<li class="step"><span class="step-num" aria-hidden="true">${makeStep.count++}</span><div><strong>${title}</strong><p>${detail}</p></div></li>`; }
 makeStep.count = 1;
 function speakText(text) {
-  if (!("speechSynthesis" in window)) { alert("Audio playback is not available in this browser. Please use a supported device or ask someone at the facility for help."); return; }
-  window.speechSynthesis.cancel();
+  if (!("speechSynthesis" in window) || !("SpeechSynthesisUtterance" in window)) {
+    alert("Spoken audio is not supported in this browser. Use your device's screen reader or the written instructions.");
+    return;
+  }
+  const synth = window.speechSynthesis;
+  synth.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
-  utterance.lang = "en-US";
+  utterance.lang = document.documentElement.lang || "en-US";
   utterance.rate = 0.9;
-  window.speechSynthesis.speak(utterance);
+  utterance.onerror = () => {
+    const status = document.getElementById("audioStatus");
+    if (status) status.textContent = "Audio could not play. Try your device's screen reader or written instructions.";
+  };
+  utterance.onstart = () => {
+    const status = document.getElementById("audioStatus");
+    if (status) status.textContent = "Audio is playing. Use Stop audio to stop it.";
+  };
+  utterance.onend = () => {
+    const status = document.getElementById("audioStatus");
+    if (status) status.textContent = "Audio finished.";
+  };
+  synth.speak(utterance);
 }
 document.querySelectorAll(".listen-btn").forEach(button => {
   button.addEventListener("click", () => speakText(button.dataset.speak));
 });
 $("listenHelp").addEventListener("click", () => speakText("Welcome to Wayfind. This is a demonstration, not a real hospital guide. First, choose where you are starting. Next, choose the place you need to visit. Then choose any accessibility options that would help you. Press Find my sample route. To hear your directions, press Read directions aloud. You can stop audio at any time. Ask hospital staff to confirm real routes and accessibility information."));
-$("stopHelpAudio").addEventListener("click", () => { if ("speechSynthesis" in window) window.speechSynthesis.cancel(); });
+$("stopHelpAudio").addEventListener("click", () => {
+  if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+  const status = document.getElementById("audioStatus");
+  if (status) status.textContent = "Audio stopped.";
+});
 function openDashboard(mode) {
   document.body.classList.remove("visual-mode", "easy-reading", "large-text", "listen-mode");
   const labels = { listen: "Listen", visual: "Visual", easy: "Easy reading", standard: "Standard" };
@@ -1007,5 +1027,56 @@ $("contrast").addEventListener("click", () => {
   $("contrast").setAttribute("aria-pressed", String(on));
 });
 </script>
+
+<section class="panel" id="voiceNavPanel" aria-labelledby="voiceNavTitle" style="margin-top:22px">
+  <h2 id="voiceNavTitle">Voice navigation</h2>
+  <p>Say what you need in your own words. Wayfind will match your request to a page or action. Review the match before it moves you.</p>
+  <div class="utility-row">
+    <button class="primary-btn" type="button" id="startVoiceNav">🎙️ Speak a request</button>
+    <button class="secondary-btn" type="button" id="stopVoiceNav">Stop listening</button>
+  </div>
+  <p id="voiceNavStatus" role="status" aria-live="polite">Ready. Try “scan a QR code,” “plan my route,” “prepare my visit,” or “go back.”</p>
+  <div id="voiceNavMatch" hidden>
+    <p id="voiceNavMatchText"></p>
+    <div class="utility-row">
+      <button class="secondary-btn" type="button" id="confirmVoiceNav">Go there</button>
+      <button class="secondary-btn" type="button" id="cancelVoiceNav">No, try again</button>
+    </div>
+  </div>
+</section>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const status = $("voiceNavStatus"), match = $("voiceNavMatch"), matchText = $("voiceNavMatchText");
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let recognition = null, pendingAction = null;
+  const actions = [
+    { terms: ["scan", "qr", "code", "camera"], label: "open the QR scanner", run: () => { $("scanPanel").hidden = false; $("scanHeading").focus(); $("startScan").setAttribute("aria-expanded","true"); $("startScan").click(); } },
+    { terms: ["route", "directions", "map", "get there", "planner"], label: "open route planning", run: () => { $("planner").scrollIntoView({behavior:"smooth"}); $("start").focus(); } },
+    { terms: ["visit", "check in", "check-in", "appointment", "prepare"], label: "open visit preparation", run: () => { $("visitPrep").scrollIntoView({behavior:"smooth"}); } },
+    { terms: ["back", "go back", "previous", "welcome"], label: "return to the welcome screen", run: () => { if (!$("welcome").hidden) { status.textContent = "You are already on the welcome screen."; return; } $("returnWelcome").click(); } },
+    { terms: ["help", "stuck", "staff"], label: "open help if you get stuck", run: () => { $("after-route-title").scrollIntoView({behavior:"smooth"}); $("showHelpScript").focus(); } }
+  ];
+  function stop() { if (recognition) { recognition.stop(); recognition = null; } }
+  $("startVoiceNav").addEventListener("click", () => {
+    if (!SpeechRecognition) { status.textContent = "Voice recognition is not available in this browser. Use the clearly labelled buttons or your device’s screen reader."; return; }
+    stop(); recognition = new SpeechRecognition(); recognition.lang = document.documentElement.lang || "en-US"; recognition.interimResults = false; recognition.maxAlternatives = 1;
+    status.textContent = "Listening. Say a destination or action.";
+    recognition.onresult = event => {
+      const spoken = event.results[0][0].transcript.toLowerCase();
+      const found = actions.find(a => a.terms.some(term => spoken.includes(term)));
+      if (!found) { pendingAction = null; match.hidden = true; status.textContent = "I’m not sure what you meant. Try “scan a QR code,” “plan my route,” “prepare my visit,” or “go back.”"; return; }
+      pendingAction = found; matchText.textContent = `I heard “${spoken}.” I can ${found.label}.`; match.hidden = false; status.textContent = "Please confirm before I navigate.";
+    };
+    recognition.onerror = () => { status.textContent = "I couldn’t hear that clearly. Try again, or use the labelled controls."; };
+    recognition.onend = () => { recognition = null; };
+    recognition.start();
+  });
+  $("stopVoiceNav").addEventListener("click", () => { stop(); status.textContent = "Listening stopped."; });
+  $("confirmVoiceNav").addEventListener("click", () => { const action = pendingAction; pendingAction = null; match.hidden = true; if (action) action.run(); });
+  $("cancelVoiceNav").addEventListener("click", () => { pendingAction = null; match.hidden = true; status.textContent = "No action taken. You can try another request."; $("startVoiceNav").focus(); });
+})();
+</script>
+
 </body>
 </html>
